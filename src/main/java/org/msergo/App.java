@@ -1,13 +1,20 @@
 package org.msergo;
 
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.cep.CEP;
+import org.apache.flink.cep.PatternStream;
+import org.apache.flink.cep.functions.PatternProcessFunction;
+import org.apache.flink.cep.pattern.Pattern;
+import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.connectors.rabbitmq.RMQSource;
 import org.apache.flink.streaming.connectors.rabbitmq.common.RMQConnectionConfig;
+import org.apache.flink.util.Collector;
+import org.msergo.sources.RabbitMQCustomSource;
+
+import java.util.List;
+import java.util.Map;
 
 public class App {
-    // Consume messages from RabbitMQ
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
@@ -19,16 +26,44 @@ public class App {
                 .setPort(5672)
                 .build();
 
+        env.setParallelism(1);
+
         final DataStream<String> stream = env
-                .addSource(new RMQSource<String>(
-                        connectionConfig,            // config for the RabbitMQ connection
-                        "test-queue",                 // name of the RabbitMQ queue to consume
-                        true,                        // use correlation ids; can be false if only at-least-once is required
-                        new SimpleStringSchema()))   // deserialization schema to turn messages into Java objects
+                .addSource(new RabbitMQCustomSource(connectionConfig, "test-exchange", "test-queue"))
                 .setParallelism(1);
 
-        stream.print();
+        Pattern<String, ?> pattern = Pattern.<String>begin("start").where(new SimpleCondition<String>() {
+                    @Override
+                    public boolean filter(String s) throws Exception {
+                        return s.equals("AAA");
+                    }
+                })
+                .next("middle").where(new SimpleCondition<String>() {
+                    @Override
+                    public boolean filter(String s) throws Exception {
+                        return s.equals("BBB");
+                    }
+                })
+                .next("end").where(new SimpleCondition<String>() {
+                    @Override
+                    public boolean filter(String s) throws Exception {
+                        return s.equals("CCC");
+                    }
+                });
 
-        env.execute();
+        PatternStream<String> patternStream = CEP.pattern(stream, pattern);
+        DataStream<String> matchedStream = patternStream
+                .inProcessingTime()
+                .process(new PatternProcessFunction<String, String>() {
+                    @Override
+                    public void processMatch(Map<String, List<String>> map, Context context, Collector<String> collector) throws Exception {
+                        collector.collect(map.get("start").toString());
+                        collector.collect(map.get("middle").toString());
+                    }
+                });
+
+        matchedStream.print();
+
+        env.execute("DemandSupply-CEP");
     }
 }
